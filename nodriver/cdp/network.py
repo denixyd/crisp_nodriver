@@ -1410,7 +1410,7 @@ class Cookie:
             secure=bool(json['secure']),
             session=bool(json['session']),
             priority=CookiePriority.from_json(json['priority']),
-            same_party=bool(json['sameParty']),
+            same_party=bool(json.get('sameParty', False)),
             source_scheme=CookieSourceScheme.from_json(json['sourceScheme']),
             source_port=int(json['sourcePort']),
             expires=float(json['expires']) if json.get('expires', None) is not None else None,
@@ -1702,7 +1702,7 @@ class CookieParam:
             same_site=CookieSameSite.from_json(json['sameSite']) if json.get('sameSite', None) is not None else None,
             expires=TimeSinceEpoch.from_json(json['expires']) if json.get('expires', None) is not None else None,
             priority=CookiePriority.from_json(json['priority']) if json.get('priority', None) is not None else None,
-            same_party=bool(json['sameParty']) if json.get('sameParty', None) is not None else None,
+            same_party=bool(json.get('sameParty', False)) if json.get('sameParty', None) is not None else None,
             source_scheme=CookieSourceScheme.from_json(json['sourceScheme']) if json.get('sourceScheme', None) is not None else None,
             source_port=int(json['sourcePort']) if json.get('sourcePort', None) is not None else None,
             partition_key=CookiePartitionKey.from_json(json['partitionKey']) if json.get('partitionKey', None) is not None else None,
@@ -2332,7 +2332,7 @@ class ClientSecurityState:
         return cls(
             initiator_is_secure_context=bool(json['initiatorIsSecureContext']),
             initiator_ip_address_space=IPAddressSpace.from_json(json['initiatorIPAddressSpace']),
-            private_network_request_policy=PrivateNetworkRequestPolicy.from_json(json['privateNetworkRequestPolicy']),
+            private_network_request_policy=PrivateNetworkRequestPolicy.from_json(json.get('privateNetworkRequestPolicy', PrivateNetworkRequestPolicy.ALLOW)),
         )
 
 
