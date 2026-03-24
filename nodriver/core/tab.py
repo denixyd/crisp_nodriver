@@ -317,11 +317,17 @@ class Tab(Connection):
         start_time = loop.time()
 
         selector = selector.strip()
-        item = await self.query_selector(selector)
+        try:
+            item = await self.query_selector(selector)
+        except (ProtocolException, asyncio.TimeoutError):
+            item = None
 
         while not item:
             await self
-            item = await self.query_selector(selector)
+            try:
+                item = await self.query_selector(selector)
+            except (ProtocolException, asyncio.TimeoutError):
+                item = None
             if loop.time() - start_time > timeout:
                 return item
             await self.sleep(0.5)
@@ -375,16 +381,24 @@ class Tab(Connection):
         now = loop.time()
         selector = selector.strip()
         items = []
-        if include_frames:
-            frames = await self.query_selector_all("iframe")
-            # unfortunately, asyncio.gather here is not an option
-            for fr in frames:
-                items.extend(await fr.query_selector_all(selector))
+        try:
+            if include_frames:
+                frames = await self.query_selector_all("iframe")
+                # unfortunately, asyncio.gather here is not an option
+                for fr in frames:
+                    items.extend(await fr.query_selector_all(selector))
 
-        items.extend(await self.query_selector_all(selector))
+            result = await self.query_selector_all(selector)
+            items.extend(result or [])
+        except (ProtocolException, asyncio.TimeoutError):
+            items = []
+
         while not items:
             await self
-            items = await self.query_selector_all(selector)
+            try:
+                items = await self.query_selector_all(selector) or []
+            except (ProtocolException, asyncio.TimeoutError):
+                items = []
             if loop.time() - now > timeout:
                 return items
             await self.sleep(0.5)
@@ -448,6 +462,30 @@ class Tab(Connection):
                 pass
         return items
 
+    async def wait_for_navigation(self, timeout: Union[int, float] = 10):
+        """
+        Wait for the page to finish navigating by listening for load/lifecycle events.
+        This is more reliable than sleeping after navigation because it waits for
+        actual DOM-ready signals from Chrome before any selector queries proceed.
+
+        :param timeout: maximum seconds to wait
+        :type timeout: float
+        """
+        event = asyncio.Event()
+
+        def _on_load(_ev):
+            event.set()
+
+        self.add_handler(cdp.page.LoadEventFired, _on_load)
+        self.add_handler(cdp.page.DomContentEventFired, _on_load)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.debug("wait_for_navigation: timed out after %.1fs", timeout)
+        finally:
+            self.remove_handler(cdp.page.LoadEventFired, _on_load)
+            self.remove_handler(cdp.page.DomContentEventFired, _on_load)
+
     async def get(
         self, url="chrome://welcome", new_tab: bool = False, new_window: bool = False
     ):
@@ -496,7 +534,11 @@ class Tab(Connection):
         """
 
         if not _node:
-            doc: cdp.dom.Node = await self.send(cdp.dom.get_document(-1, True))
+            try:
+                doc: cdp.dom.Node = await self.send(cdp.dom.get_document(-1, True))
+            except asyncio.TimeoutError:
+                logger.debug("query_selector_all: get_document timed out")
+                return []
         else:
             doc = _node
             if _node.node_name == "IFRAME":
@@ -512,9 +554,13 @@ class Tab(Connection):
             # has no content_document
             return
 
+        except asyncio.TimeoutError:
+            logger.debug("query_selector_all: query timed out for selector %r", selector)
+            return []
+
         except ProtocolException as e:
             if _node is not None:
-                if "could not find node" in e.message.lower():
+                if "could not find node" in (e.message or "").lower():
                     if getattr(_node, "__last", None):
                         del _node.__last
                         return []
@@ -526,8 +572,21 @@ class Tab(Connection):
                     )
                     return await self.query_selector_all(selector, _node)
             else:
-                await self.send(cdp.dom.disable())
-                raise
+                # root document node is stale (common after navigation) — re-fetch and retry once
+                if "could not find node" in (e.message or "").lower():
+                    logger.debug(
+                        "query_selector_all: root document node stale, re-fetching document and retrying"
+                    )
+                    try:
+                        doc = await self.send(cdp.dom.get_document(-1, True))
+                        node_ids = await self.send(
+                            cdp.dom.query_selector_all(doc.node_id, selector)
+                        )
+                    except (ProtocolException, asyncio.TimeoutError):
+                        return []
+                else:
+                    await self.send(cdp.dom.disable())
+                    raise
         if not node_ids:
             return []
         items = []
@@ -559,7 +618,11 @@ class Tab(Connection):
         selector = selector.strip()
 
         if not _node:
-            doc: cdp.dom.Node = await self.send(cdp.dom.get_document(-1, True))
+            try:
+                doc: cdp.dom.Node = await self.send(cdp.dom.get_document(-1, True))
+            except asyncio.TimeoutError:
+                logger.debug("query_selector: get_document timed out")
+                return None
         else:
             doc = _node
             if _node.node_name == "IFRAME":
@@ -569,9 +632,13 @@ class Tab(Connection):
         try:
             node_id = await self.send(cdp.dom.query_selector(doc.node_id, selector))
 
+        except asyncio.TimeoutError:
+            logger.debug("query_selector: query timed out for selector %r", selector)
+            return None
+
         except ProtocolException as e:
             if _node is not None:
-                if "could not find node" in e.message.lower():
+                if "could not find node" in (e.message or "").lower():
                     if getattr(_node, "__last", None):
                         del _node.__last
                         return []
@@ -583,8 +650,21 @@ class Tab(Connection):
                     )
                     return await self.query_selector(selector, _node)
             else:
-                await self.send(cdp.dom.disable())
-                raise
+                # root document node is stale (common after navigation) — re-fetch and retry once
+                if "could not find node" in (e.message or "").lower():
+                    logger.debug(
+                        "query_selector: root document node stale, re-fetching document and retrying"
+                    )
+                    try:
+                        doc = await self.send(cdp.dom.get_document(-1, True))
+                        node_id = await self.send(
+                            cdp.dom.query_selector(doc.node_id, selector)
+                        )
+                    except (ProtocolException, asyncio.TimeoutError):
+                        return None
+                else:
+                    await self.send(cdp.dom.disable())
+                    raise
         if not node_id:
             return
         node = util.filter_recurse(doc, lambda n: n.node_id == node_id)
@@ -1289,20 +1369,31 @@ class Tab(Connection):
         loop = asyncio.get_running_loop()
         now = loop.time()
         if selector:
-            item = await self.query_selector(selector)
-            while not item:
+            try:
                 item = await self.query_selector(selector)
+            except (ProtocolException, asyncio.TimeoutError):
+                item = None
+            while not item:
+                try:
+                    item = await self.query_selector(selector)
+                except (ProtocolException, asyncio.TimeoutError):
+                    item = None
                 if loop.time() - now > timeout:
                     raise asyncio.TimeoutError(
                         "time ran out while waiting for %s" % selector
                     )
                 await self.sleep(0.5)
-                # await self.sleep(0.5)
             return item
         if text:
-            item = await self.find_element_by_text(text)
-            while not item:
+            try:
                 item = await self.find_element_by_text(text)
+            except (ProtocolException, asyncio.TimeoutError):
+                item = None
+            while not item:
+                try:
+                    item = await self.find_element_by_text(text)
+                except (ProtocolException, asyncio.TimeoutError):
+                    item = None
                 if loop.time() - now > timeout:
                     raise asyncio.TimeoutError(
                         "time ran out while waiting for text: %s" % text

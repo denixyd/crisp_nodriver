@@ -444,7 +444,15 @@ class Connection(metaclass=CantTouchThis):
                 message = json.loads(raw)
                 seen_one = True
                 if "id" in message:
-                    tx: Transaction = self.mapper.pop(message["id"])
+                    tx: Transaction = self.mapper.pop(message["id"], None)
+                    if tx is None:
+                        # Response arrived for an already-expired or unknown transaction.
+                        # Discard silently — do NOT crash the listener.
+                        logger.debug(
+                            "discarding response for unknown/expired transaction id=%s",
+                            message["id"],
+                        )
+                        continue
                     tx(**message)
                     logger.debug("got answer for (message_id:%d) => %s", tx.id, message)
                 else:
@@ -497,7 +505,10 @@ class Connection(metaclass=CantTouchThis):
                         raise
 
     async def send(
-        self, cdp_obj: Generator[dict[str, Any], dict[str, Any], Any], _is_update=False
+        self,
+        cdp_obj: Generator[dict[str, Any], dict[str, Any], Any],
+        _is_update=False,
+        _timeout: float = 20,
     ) -> Any:
         """
         send a protocol command. the commands are made using any of the cdp.<domain>.<method>()'s
@@ -508,6 +519,7 @@ class Connection(metaclass=CantTouchThis):
         :param _is_update: internal flag
             prevents infinite loop by skipping the registeration of handlers
             when multiple calls to connection.send() are made
+        :param _timeout: seconds before raising asyncio.TimeoutError if Chrome never responds
         :return:
         """
         if self.closed:
@@ -519,7 +531,18 @@ class Connection(metaclass=CantTouchThis):
         tx.id = the_id
         self.mapper[the_id] = tx
         asyncio.create_task(self.websocket.send(tx.message))
-        return await tx
+        try:
+            return await asyncio.wait_for(asyncio.shield(tx), timeout=_timeout)
+        except asyncio.TimeoutError:
+            # Remove the stale transaction so it doesn't linger in mapper
+            self.mapper.pop(the_id, None)
+            logger.debug(
+                "send() timed out after %.1fs waiting for response to %s (id=%d)",
+                _timeout,
+                tx.method,
+                the_id,
+            )
+            raise
 
     async def _send_oneshot(self, cdp_obj):
         """fire and forget , eg: send command without waiting for any response"""
