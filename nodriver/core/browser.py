@@ -75,6 +75,7 @@ class Browser:
         sandbox: bool = True,
         host: str = None,
         port: int = None,
+        launch_time_limit: int = 5,
         **kwargs,
     ) -> Browser:
         """
@@ -89,6 +90,7 @@ class Browser:
                 sandbox=sandbox,
                 host=host,
                 port=port,
+                launch_time_limit=launch_time_limit,
                 **kwargs,
             )
         instance = cls(config)
@@ -366,7 +368,6 @@ class Browser:
             warnings.warn("ignored! this call has no effect when already running.")
             return
 
-        # self.config.update(kwargs)
         connect_existing = False
         if self.config.host is not None and self.config.port is not None:
             connect_existing = True
@@ -424,14 +425,35 @@ class Browser:
 
         self._http = HTTPApi((self.config.host, self.config.port))
         util.get_registered_instances().add(self)
-        await asyncio.sleep(0.25)
-        for _ in range(5):
+
+        # Check browser process output during sleep
+        if hasattr(self, '_process') and self._process:
+            async def check_process_status():
+                for i in range(self.config.launch_time_limit):
+                    await asyncio.sleep(1)
+                    if self._process.returncode is not None:
+                        # Try to read any error output
+                        try:
+                            stderr_output = await asyncio.wait_for(self._process.stderr.read(1000), timeout=0.5)
+                            if stderr_output:
+                                print(f"[DEBUG] Browser stderr: {stderr_output.decode('utf-8', errors='ignore')}")
+                        except:
+                            pass
+                        break
+
+            await check_process_status()
+        else:
+            await asyncio.sleep(10)
+
+        print("Browser started, waiting for connection...")
+
+        for attempt in range(5):
             try:
                 self.info = ContraDict(await self._http.get("version"), silent=True)
-            except (Exception,):
-                if _ == 4:
+            except Exception as e:
+                if attempt == 4:
                     logger.debug("could not start", exc_info=True)
-                await asyncio.sleep(0.5)
+                await self.sleep(0.5)
             else:
                 break
 
@@ -443,7 +465,7 @@ class Browser:
                 Failed to connect to browser
                 ---------------------
                 One of the causes could be when you are running as root.
-                In that case you need to pass no_sandbox=True 
+                In that case you need to pass no_sandbox=True
                 """
                 )
             )
@@ -468,7 +490,7 @@ class Browser:
             await self.connection.send(cdp.target.set_discover_targets(discover=True))
 
         await self.update_targets()
-        await self
+        return self
 
     async def grant_all_permissions(self):
         """

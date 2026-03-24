@@ -45,6 +45,7 @@ class Config:
         host: str = AUTO,
         port: int = AUTO,
         expert: bool = AUTO,
+        launch_time_limit: int = 5,
         **kwargs: dict,
     ):
         """
@@ -68,7 +69,7 @@ class Config:
         :param expert: when set to True, enabled "expert" mode.
                This conveys, the inclusion of parameters:  ----disable-site-isolation-trials,
                as well as some scripts and patching useful for debugging (for example, ensuring shadow-root is always in "open" mode)
-
+        :param launch_time_limit: the maximum time to wait for the browser to launch in seconds
         :param kwargs:
 
         :type user_data_dir: PathLike
@@ -77,6 +78,7 @@ class Config:
         :type browser_args: list[str]
         :type sandbox: bool
         :type lang: str
+        :type launch_time_limit: int
         :type kwargs: dict
         """
 
@@ -100,6 +102,7 @@ class Config:
         self.host = host
         self.port = port
         self.expert = expert
+        self.launch_time_limit = launch_time_limit
         self._extensions = []
         # when using posix-ish operating system and running as root
         # you must use no_sandbox = True, which in case is corrected here
